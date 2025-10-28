@@ -1,0 +1,17 @@
+{
+  "name": "ipfs",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/multipart": "^9.3.0",
+    "daemon": "^1.1.0",
+    "fastify": "^5.6.1",
+    "ipfs-http-client": "^60.0.1"
+  }
+}
