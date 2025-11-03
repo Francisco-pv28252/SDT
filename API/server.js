@@ -74,7 +74,7 @@ server.post('/files', async (req, res) => {
             embedding: vector
         });
 
-        await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify({ cid, filename: file.filename }), "utf-8"));
+        await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify({ saveddata }), "utf-8"));
 
 
         return {
