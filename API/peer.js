@@ -20,6 +20,9 @@ await ipfs.pubsub.subscribe(TOPIC, async (msg) => {
   if (data.action === "propose") {
     if (data.version <= currentVersion) return;
 
+    console.log(`Proposta recebida (versão=${data.version}):`);
+    console.log(data.saveddata);
+
     const newVector = data.saveddata || [];
     const hash = hashVector(newVector);
 
@@ -31,11 +34,12 @@ await ipfs.pubsub.subscribe(TOPIC, async (msg) => {
   if (data.action === "commit") {
     if (data.version <= currentVersion) return;
 
-    const { version, cid, embedding } = data;
+    const { version, cid, embedding, saveddata } = data;
     currentVersion = version;
     cids.push({ version, cid });
     tempEmbeddings.push({ version, cid, embedding });
     console.log(`Commit confirmado: versão ${version}, CID=${cid}`);
+    console.log("Vetor atualizado no peer:", saveddata);
   }
 });
 

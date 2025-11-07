@@ -4,10 +4,12 @@ import { pipeline } from "@xenova/transformers";
 
 const server = fastify();
 const ipfs = create({ host: "localhost", port: 5001, protocol: "http" });
+
 const saveddata = [];
 const prevsaveddata = [];
 const localEmbeddings = [];
 const confirmations = new Map();
+
 const REQUIRED_PEERS = ["peer-7582"];
 let embedder;
 let v = 1;
@@ -16,16 +18,20 @@ await server.register(import("@fastify/multipart"));
 
 const TOPIC = "mensagens-sistema";
 
+function hashVector(vetor) {
+  return vetor.map(x => x.cid).join("|").split("").reduce((a, c) => (a + c.charCodeAt(0)) % 100000, 0);
+}
+
 async function subscribeToMessages() {
   await ipfs.pubsub.subscribe(TOPIC, async (msg) => {
     const mensagem = new TextDecoder("utf-8").decode(msg.data);
     try {
       const data = JSON.parse(mensagem);
 
-      if (data.action === "ack" && typeof data.version === "number") {
-        if (!confirmations.has(data.version)) confirmations.set(data.version, new Set());
-        confirmations.get(data.version).add(data.peerId);
-        console.log(`ACK de ${data.peerId} para versão ${data.version}`);
+      if (data.action === "ack") {
+        if (!confirmations.has(data.version)) confirmations.set(data.version, new Map());
+        confirmations.get(data.version).set(data.peerId, data.hash);
+        console.log(`ACK de ${data.peerId} para versão ${data.version} com hash=${data.hash}`);
         return;
       }
 
@@ -35,7 +41,7 @@ async function subscribeToMessages() {
       }
 
       console.log("Mensagem recebida:", mensagem);
-    } catch (err) {
+    } catch {
       console.log("Mensagem não JSON:", mensagem);
     }
   });
@@ -50,27 +56,32 @@ server.post("/files", async (req, res) => {
 
     const fileBuffer = await file.toBuffer();
     const filename = file.filename || "unnamed";
-    const candidateVersion = v + 1;
+
 
     const proposta = {
       action: "propose",
-      version: candidateVersion,
-      filename,
-      size: fileBuffer.length,
+      version: v,
+      saveddata,
     };
 
     await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify(proposta), "utf-8"));
-    console.log(`Proposta enviada (versão=${candidateVersion}, ficheiro=${filename})`);
+    console.log(`Proposta enviada (versão=${v}, ficheiro=${filename})`);
+    console.log("Estado atual do vetor (antes do commit):", saveddata);
 
-    confirmations.set(candidateVersion, new Set());
+    confirmations.set(v, new Map());
     const TIMEOUT_MS = 20000;
 
     const waitForAllPeers = () =>
       new Promise((resolve) => {
         const start = Date.now();
         const check = () => {
-          const confirmed = confirmations.get(candidateVersion);
-          if (confirmed && REQUIRED_PEERS.every((p) => confirmed.has(p))) return resolve(true);
+          const confirmed = confirmations.get(v);
+          if (
+            confirmed &&
+            REQUIRED_PEERS.every((p) => confirmed.has(p)) &&
+            new Set([...confirmed.values()]).size === 1
+          )
+            return resolve(true);
           if (Date.now() - start > TIMEOUT_MS) return resolve(false);
           setTimeout(check, 300);
         };
@@ -79,15 +90,13 @@ server.post("/files", async (req, res) => {
 
     const todosConfirmaram = await waitForAllPeers();
     if (!todosConfirmaram) {
-      return res
-        .code(409)
-        .send({ error: "Nem todos os peers confirmaram a nova versão. Operação abortada." });
+      return res.code(409).send({ error: "Nem todos os peers confirmaram a nova versão." });
     }
 
     const meta = { path: filename, content: fileBuffer };
     const response = await ipfs.add(meta);
     const cid = response.cid.toString();
-    console.log(`Ficheiro adicionado ao IPFS com CID=${cid}`);
+
 
     let vector = null;
     if (embedder) {
@@ -97,24 +106,29 @@ server.post("/files", async (req, res) => {
       vector = Array.from(output.data);
     }
 
-    v = candidateVersion;
+
     prevsaveddata.push([...saveddata]);
     saveddata.push({ version: v, cid });
     localEmbeddings.push({ version: v, cid, embedding: vector });
+
+    console.log(`Novo vetor (após commit versão ${v}):`);
+    console.log(saveddata);
 
     const commitMsg = {
       action: "commit",
       version: v,
       cid,
       embedding: vector,
+      saveddata,
     };
 
     await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify(commitMsg), "utf-8"));
     console.log(`Commit publicado: versão=${v}, CID=${cid}`);
 
-    confirmations.delete(candidateVersion);
+    confirmations.delete(v);
+    v++;
 
-    return { status: "Commit enviado", version: v, cid };
+    return { status: "Commit enviado", version: v - 1, cid };
   } catch (err) {
     console.error("Erro no endpoint /files:", err);
     return res.code(500).send({ error: "Erro ao processar ficheiro" });
