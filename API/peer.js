@@ -1,46 +1,42 @@
 import { create } from "ipfs-http-client";
+import { pipeline } from "@xenova/transformers";
+
 const ipfs = create({ host: "localhost", port: 5001, protocol: "http" });
 const TOPIC = "mensagens-sistema";
 
 let currentVersion = 0;
 const cids = [];
 const tempEmbeddings = [];
+let embedder;
+const peerId = `peer-${Math.floor(Math.random() * 10000)}`;
 
-function calcularHash(vetor) {
-  return String(vetor.join("|").hashCode || vetor.length);
+function hashVector(v) {
+  return v.join("|").split("").reduce((a, c) => (a + c.charCodeAt(0)) % 100000, 0);
 }
 
 await ipfs.pubsub.subscribe(TOPIC, async (msg) => {
   const data = JSON.parse(new TextDecoder().decode(msg.data));
 
   if (data.action === "propose") {
-    console.log(`Proposta recebida: versão=${data.version}, CID=${data.cid}`);
+    if (data.version <= currentVersion) return;
 
-    if (data.version <= currentVersion) {
-      console.log("Conflito de versão detectado (a resolver futuramente).");
-      return;
-    }
-
-    const newVector = [...cids, data.cid];
-    const hash = calcularHash(newVector);
-    tempEmbeddings.push({ version: data.version, cid: data.cid, embedding: data.embedding });
-
-    await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify({
-      action: "confirm",
-      version: data.version,
-      hash
-    })));
-
-    console.log(`Enviada confirmação da versão ${data.version}`);
+    const newVector = [...cids];
+    const hash = hashVector(newVector);
+    const ack = { action: "ack", version: data.version, peerId, hash };
+    await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify(ack), "utf-8"));
+    console.log(`ACK enviado para versão ${data.version}`);
   }
 
   if (data.action === "commit") {
-    if (data.version > currentVersion) {
-      currentVersion = data.version;
-      cids.push(tempEmbeddings.find(e => e.version === data.version).cid);
-      console.log(`Commit confirmado: versão ${currentVersion}`);
-    }
+    if (data.version <= currentVersion) return;
+
+    const { version, cid, embedding } = data;
+    currentVersion = version;
+    cids.push(cid);
+    tempEmbeddings.push({ version, cid, embedding });
+    console.log(`Commit confirmado: versão ${version}, CID=${cid}`);
   }
 });
 
-console.log("Peer a ouvir o tópico", TOPIC);
+console.log("Peer ativo e subscrito ao tópico", TOPIC);
+embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
