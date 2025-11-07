@@ -24,6 +24,7 @@ async function subscribe() {
     const mensagem = new TextDecoder("utf-8").decode(msg.data)
     try {
       const data = JSON.parse(mensagem)
+      if (data.peerId === peerId) return
 
       if (data.action === "hello" && data.peerId) {
         console.log(`Peer detectado: ${data.peerId}`)
@@ -79,7 +80,7 @@ server.listen({ port: 5325 }, async () => {
   peerId = id.id
 
   await subscribe()
-  
+
   const helloMsg = { action: "hello", peerId }
   await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify(helloMsg), "utf-8"))
   console.log(`Presença anunciada: ${peerId}`)
