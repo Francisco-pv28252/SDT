@@ -8,10 +8,10 @@ let currentVersion = 0;
 const cids = [];
 const tempEmbeddings = [];
 let embedder;
-const peerId = `peer-${Math.floor(Math.random() * 10000)}`;
+const peerId = "peer-7582";
 
 function hashVector(v) {
-  return v.join("|").split("").reduce((a, c) => (a + c.charCodeAt(0)) % 100000, 0);
+  return v.map(x => x.cid).join("|").split("").reduce((a, c) => (a + c.charCodeAt(0)) % 100000, 0);
 }
 
 await ipfs.pubsub.subscribe(TOPIC, async (msg) => {
@@ -20,11 +20,12 @@ await ipfs.pubsub.subscribe(TOPIC, async (msg) => {
   if (data.action === "propose") {
     if (data.version <= currentVersion) return;
 
-    const newVector = [...cids];
+    const newVector = data.saveddata || [];
     const hash = hashVector(newVector);
+
     const ack = { action: "ack", version: data.version, peerId, hash };
     await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify(ack), "utf-8"));
-    console.log(`ACK enviado para versão ${data.version}`);
+    console.log(`ACK enviado (versão ${data.version}, hash=${hash})`);
   }
 
   if (data.action === "commit") {
@@ -32,7 +33,7 @@ await ipfs.pubsub.subscribe(TOPIC, async (msg) => {
 
     const { version, cid, embedding } = data;
     currentVersion = version;
-    cids.push(cid);
+    cids.push({ version, cid });
     tempEmbeddings.push({ version, cid, embedding });
     console.log(`Commit confirmado: versão ${version}, CID=${cid}`);
   }

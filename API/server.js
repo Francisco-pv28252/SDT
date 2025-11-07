@@ -8,7 +8,7 @@ const saveddata = [];
 const prevsaveddata = [];
 const localEmbeddings = [];
 const confirmations = new Map();
-const REQUIRED_PEERS = ["peer1"];
+const REQUIRED_PEERS = ["peer-7582"];
 let embedder;
 let v = 1;
 
