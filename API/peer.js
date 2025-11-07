@@ -10,10 +10,19 @@ function hashVector(vetor) {
 }
 
 async function getPeerId() {
-  const idInfo = await ipfs.id();
-  PEER_ID = idInfo.id || `peer-${Math.floor(Math.random() * 10000)}`;
-  console.log(`Peer ativo: ${PEER_ID}`);
+  try {
+    const idInfo = await ipfs.id();
+
+    const safeAddresses = idInfo.addresses?.filter(a => !a.includes("webrtc-direct")) || [];
+
+    PEER_ID = idInfo.id;
+    console.log(`Peer ativo: ${PEER_ID}`);
+    console.log("Endereços disponíveis:", safeAddresses);
+  } catch (err) {
+    console.error("Erro ao obter ID do peer:", err.message);
+  }
 }
+
 
 async function subscribe() {
   await ipfs.pubsub.subscribe(TOPIC, async (msg) => {
