@@ -5,20 +5,17 @@ const app = Fastify()
 const TOPICO = "mensagens-sistema"
 const peersAtivos = new Set()
 
-// Ligação ao daemon local do IPFS
 const ipfs = create({ host: "localhost", port: 5001, protocol: "http" })
 
-async function getSafePeerId() {
-  try {
-    const info = await ipfs.id()
-    // Filtra endereços com protocolos desconhecidos (ex: webrtc-direct)
-    info.addresses = info.addresses?.filter(a => !a.includes("webrtc-direct")) || []
-    return info.id
-  } catch (err) {
-    console.warn("⚠️  Erro ao obter peerId. A usar ID temporário.", err.message)
-    return `peer-temp-${Math.random().toString(36).substring(2, 8)}`
-  }
+async function getConnectedPeers() {
+  const peers = await ipfs.swarm.peers()
+  const locais = peers
+    .filter(p => p.addr.toString().includes("127.0.0.1") || p.addr.toString().includes("192.168.") || p.addr.toString().includes("/ip4/10."))
+    .map(p => p.peer.toString())
+  console.log(`Peers locais conectados: ${locais.join(", ") || "(nenhum)"}`)
+  return locais
 }
+
 
 async function anunciarPresenca() {
   const peerId = await getSafePeerId()
@@ -39,11 +36,11 @@ async function subscrever() {
       console.log("Mensagem recebida inválida no pubsub.")
     }
   })
-  console.log(`✅ Subscrito ao tópico "${TOPICO}"`)
+  console.log(`Subscrito ao tópico "${TOPICO}"`)
 }
 
 function mostrarPeers() {
-  console.log("🔗 Peers ativos:", Array.from(peersAtivos).join(", ") || "(nenhum)")
+  console.log("Peers ativos:", Array.from(peersAtivos).join(", ") || "(nenhum)")
 }
 
 await subscrever()
