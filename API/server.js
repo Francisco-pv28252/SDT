@@ -9,7 +9,7 @@ const saveddata = [];
 const prevsaveddata = [];
 const localEmbeddings = [];
 const confirmations = new Map();
-
+const activePeers = new Set();
 
 let embedder;
 let v = 1;
@@ -19,12 +19,14 @@ await server.register(import("@fastify/multipart"));
 const TOPIC = "mensagens-sistema";
 
 function hashVector(vetor) {
-  return vetor.map(x => x.cid).join("|").split("").reduce((a, c) => (a + c.charCodeAt(0)) % 100000, 0);
+  return vetor.map(x => x.cid).join("|").split("")
+    .reduce((a, c) => (a + c.charCodeAt(0)) % 100000, 0);
 }
 
 async function getConnectedPeers() {
   const peers = await ipfs.swarm.peers();
   const peerIds = peers.map(p => p.peer.toString());
+  peerIds.forEach(id => activePeers.add(id));
   console.log(`Peers conectados: ${peerIds.join(", ") || "(nenhum)"}`);
   return peerIds;
 }
@@ -35,8 +37,14 @@ async function subscribeToMessages() {
     try {
       const data = JSON.parse(mensagem);
 
+      if (data.action === "hello") {
+        if (data.peerId) activePeers.add(data.peerId);
+        return;
+      }
+
       if (data.action === "ack") {
-        if (!confirmations.has(data.version)) confirmations.set(data.version, new Map());
+        if (!confirmations.has(data.version))
+          confirmations.set(data.version, new Map());
         confirmations.get(data.version).set(data.peerId, data.hash);
         console.log(`ACK de ${data.peerId} para versão ${data.version} (hash=${data.hash})`);
         return;
@@ -66,16 +74,17 @@ server.post("/files", async (req, res) => {
     const candidateVersion = v + 1;
 
     const REQUIRED_PEERS = await getConnectedPeers();
-    if (REQUIRED_PEERS.length === 0) {
+    if (REQUIRED_PEERS.length === 0)
       return res.code(503).send({ error: "Nenhum peer conectado" });
-    }
+
 
     const proposta = { action: "propose", version: candidateVersion, saveddata };
     await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify(proposta), "utf-8"));
     console.log(`Proposta enviada (versão=${candidateVersion}, ficheiro=${filename})`);
-    console.log("Estado atual do vetor (antes do commit):", saveddata);
+
 
     confirmations.set(candidateVersion, new Map());
+
     const TIMEOUT_MS = 20000;
 
     const waitForAllPeers = () =>
@@ -85,10 +94,9 @@ server.post("/files", async (req, res) => {
           const confirmed = confirmations.get(candidateVersion);
           if (
             confirmed &&
-            REQUIRED_PEERS.every((p) => confirmed.has(p)) &&
+            REQUIRED_PEERS.every(p => confirmed.has(p)) &&
             new Set([...confirmed.values()]).size === 1
-          )
-            return resolve(true);
+          ) return resolve(true);
           if (Date.now() - start > TIMEOUT_MS) return resolve(false);
           setTimeout(check, 300);
         };
@@ -96,9 +104,9 @@ server.post("/files", async (req, res) => {
       });
 
     const todosConfirmaram = await waitForAllPeers();
-    if (!todosConfirmaram) {
+    if (!todosConfirmaram)
       return res.code(409).send({ error: "Nem todos os peers confirmaram a nova versão." });
-    }
+
 
     const meta = { path: filename, content: fileBuffer };
     const response = await ipfs.add(meta);
@@ -113,17 +121,19 @@ server.post("/files", async (req, res) => {
     }
 
     prevsaveddata.push([...saveddata]);
-    if (saveddata.length === 0 || !saveddata[0].version) saveddata.unshift({ version: candidateVersion });
-    else saveddata[0].version = candidateVersion;
+    if (saveddata.length === 0 || !saveddata[0].version)
+      saveddata.unshift({ version: candidateVersion });
+    else
+      saveddata[0].version = candidateVersion;
+
     saveddata.push({ cid });
     localEmbeddings.push({ version: candidateVersion, cid, embedding: vector });
 
-    console.log(`Novo vetor (após commit versão ${candidateVersion}):`);
-    console.log(saveddata);
+
 
     const commitMsg = { action: "commit", version: candidateVersion, cid, embedding: vector, saveddata };
     await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify(commitMsg), "utf-8"));
-    console.log(`Commit publicado: versão=${candidateVersion}, CID=${cid}`);
+
 
     confirmations.delete(candidateVersion);
     v = candidateVersion;
@@ -141,4 +151,8 @@ server.listen({ port: 5323 }, async () => {
   embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
   console.log("Modelo de embeddings carregado");
   await subscribeToMessages();
+
+  const id = await ipfs.id().catch(() => ({ id: "local-peer" }));
+  const helloMsg = { action: "hello", peerId: id.id };
+  await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify(helloMsg), "utf-8"));
 });
