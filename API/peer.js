@@ -1,5 +1,6 @@
 import Fastify from "fastify"
 import { create } from "ipfs-http-client"
+import fetch from "node-fetch"
 
 const ipfs = create({ host: "localhost", port: 5001, protocol: "http" })
 const server = Fastify()
@@ -8,9 +9,11 @@ const TOPICO = "mensagens-sistema"
 
 async function getSafePeerId() {
   try {
-    const id = await ipfs.id()
-    return id.id
-  } catch {
+    const res = await fetch("http://localhost:5001/api/v0/id")
+    const data = await res.json()
+    return data.ID
+  } catch (err) {
+    console.error("Erro ao obter PeerID:", err)
     return "unknown-peer"
   }
 }
@@ -37,11 +40,8 @@ function mostrarPeers() {
   console.log("Peers ativos:", Array.from(peersAtivos).join(", ") || "(nenhum)")
 }
 
-
-
 await subscrever()
 await anunciarPresenca()
-
 
 server.get("/peers", async () => ({ peers: Array.from(peersAtivos) }))
 server.listen({ port: 5324 })
