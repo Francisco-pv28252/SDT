@@ -1,100 +1,130 @@
 import fastify from "fastify";
-import {create} from "ipfs-http-client";
+import { create } from "ipfs-http-client";
 import { pipeline } from "@xenova/transformers";
 
 const server = fastify();
-const ipfs = create({host:"localhost",port:5001,protocol:"http"});
+const ipfs = create({ host: "localhost", port: 5001, protocol: "http" });
 const saveddata = [];
+const prevsaveddata = [];
+const localEmbeddings = [];
+const confirmations = new Map();
+const REQUIRED_PEERS = ["peer1", "peer2", "peer3"];
 let embedder;
+let v = 1;
 
 await server.register(import("@fastify/multipart"));
 
-const TOPIC = 'mensagens-sistema';
-
-const handler = (msg) => {
-    const mensagem = new TextDecoder("utf-8").decode(msg.data);
-    try {
-        const data = JSON.parse(mensagem);
-        console.log(`Mensagem recebida: CID=${data.cid}, versão=${data.version}, embedding.length=${data.embedding.length}`);
-    } catch (err) {
-        console.log("Mensagem recebida (não JSON):", mensagem);
-    }
-};
+const TOPIC = "mensagens-sistema";
 
 async function subscribeToMessages() {
-    const handler = (msg) => {
-        const mensagem = new TextDecoder("utf-8").decode(msg.data);
-        console.log(`Mensagem recebida de ${msg.from}: ${mensagem}`);
-    };
+  await ipfs.pubsub.subscribe(TOPIC, async (msg) => {
+    const mensagem = new TextDecoder("utf-8").decode(msg.data);
+    try {
+      const data = JSON.parse(mensagem);
 
-    await ipfs.pubsub.subscribe(TOPIC, handler);
-    console.log(`Subscrito ao tópico ${TOPIC}`);
+      if (data.action === "ack" && typeof data.version === "number") {
+        if (!confirmations.has(data.version)) confirmations.set(data.version, new Set());
+        confirmations.get(data.version).add(data.peerId);
+        console.log(`ACK de ${data.peerId} para versão ${data.version}`);
+        return;
+      }
+
+      if (data.action === "commit") {
+        console.log(`Commit recebido: versão=${data.version}, cid=${data.cid}`);
+        return;
+      }
+
+      console.log("Mensagem recebida:", mensagem);
+    } catch (err) {
+      console.log("Mensagem não JSON:", mensagem);
+    }
+  });
+
+  console.log(`Subscrito ao tópico ${TOPIC}`);
 }
 
-server.post('/mensagem', async (req, res) => {
-    const { mensagem } = req.body;
-    console.log(mensagem)
+server.post("/files", async (req, res) => {
+  try {
+    const file = await req.file();
+    if (!file) return res.code(400).send({ error: "Nenhum ficheiro enviado" });
 
-    if (!mensagem) {
-        return res.code(400).send({ error: 'Mensagem não fornecida' });
-    }
+    const fileBuffer = await file.toBuffer();
+    const filename = file.filename || "unnamed";
+    const candidateVersion = v + 1;
 
-    await ipfs.pubsub.publish(TOPIC, Buffer.from(mensagem, "utf-8"));
-    return { status: 'Mensagem enviada', mensagem };
-});
+    const proposta = {
+      action: "propose",
+      version: candidateVersion,
+      filename,
+      size: fileBuffer.length,
+    };
 
-server.post('/files', async (req, res) => {
-    try {
-        if (!embedder) {
-            return res.code(503).send({ error: "Modelo de embeddings ainda a carregar. Tente novamente em alguns segundos." });
-        }
+    await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify(proposta), "utf-8"));
+    console.log(`Proposta enviada (versão=${candidateVersion}, ficheiro=${filename})`);
 
-        const file = await req.file();
-        if (!file) return res.code(400).send({ error: 'Nenhum ficheiro enviado' });
+    confirmations.set(candidateVersion, new Set());
+    const TIMEOUT_MS = 20000;
 
-        const meta = { path: file.filename, content: file.file };
-        const response = await ipfs.add(meta);
-        const cid = response.cid.toString();
-
-        const fileBuffer = await file.toBuffer();
-        let text = fileBuffer.toString("utf-8").replace(/\0/g, ""); 
-        text = text.slice(0, 1000); 
-
-        console.log(`A gerar embeddings para o ficheiro: ${file.filename}...`);
-
-        const output = await embedder(text, { pooling: "mean", normalize: true });
-        const vector = output.data; 
-
-        console.log("Embedding gerado (primeiros 5 valores):", vector.slice(0, 5));
-        console.log(`Dimensão do vetor: ${vector.length}`);
-
-        saveddata.push({
-            version: 1,
-            cid: cid,
-            embedding: vector
-        });
-
-        await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify({ saveddata }), "utf-8"));
-
-
-        return {
-            cid: response,
-            filename: file.filename,
-            embeddingLength: vector.length
+    const waitForAllPeers = () =>
+      new Promise((resolve) => {
+        const start = Date.now();
+        const check = () => {
+          const confirmed = confirmations.get(candidateVersion);
+          if (confirmed && REQUIRED_PEERS.every((p) => confirmed.has(p))) return resolve(true);
+          if (Date.now() - start > TIMEOUT_MS) return resolve(false);
+          setTimeout(check, 300);
         };
-    } catch (err) {
-        console.error("Erro ao gerar embedding:", err);
-        return res.code(500).send({ error: "Erro ao gerar embedding" });
+        check();
+      });
+
+    const todosConfirmaram = await waitForAllPeers();
+    if (!todosConfirmaram) {
+      return res
+        .code(409)
+        .send({ error: "Nem todos os peers confirmaram a nova versão. Operação abortada." });
     }
+
+    const meta = { path: filename, content: fileBuffer };
+    const response = await ipfs.add(meta);
+    const cid = response.cid.toString();
+    console.log(`Ficheiro adicionado ao IPFS com CID=${cid}`);
+
+    let vector = null;
+    if (embedder) {
+      let text = fileBuffer.toString("utf-8").replace(/\0/g, "");
+      text = text.slice(0, 1000);
+      const output = await embedder(text, { pooling: "mean", normalize: true });
+      vector = Array.from(output.data);
+    }
+
+    v = candidateVersion;
+    prevsaveddata.push([...saveddata]);
+    saveddata.push({ version: v, cid });
+    localEmbeddings.push({ version: v, cid, embedding: vector });
+
+    const commitMsg = {
+      action: "commit",
+      version: v,
+      cid,
+      embedding: vector,
+    };
+
+    await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify(commitMsg), "utf-8"));
+    console.log(`Commit publicado: versão=${v}, CID=${cid}`);
+
+    confirmations.delete(candidateVersion);
+
+    return { status: "Commit enviado", version: v, cid };
+  } catch (err) {
+    console.error("Erro no endpoint /files:", err);
+    return res.code(500).send({ error: "Erro ao processar ficheiro" });
+  }
 });
-
-
-
 
 server.listen({ port: 5323 }, async () => {
-    console.log('Servidor a correr na porta 5323');
-    console.log("A carregar modelo de embeddings...");
-    embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
-    console.log("Modelo de embeddings carregado com sucesso!");
-    await subscribeToMessages();
+  console.log("Servidor a correr na porta 5323");
+  console.log("A carregar modelo de embeddings...");
+  embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
+  console.log("Modelo de embeddings carregado");
+  await subscribeToMessages();
 });
