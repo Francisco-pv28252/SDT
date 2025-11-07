@@ -88,9 +88,11 @@ server.post("/files", async (req, res) => {
     const peers = Array.from(activePeers)
     if (peers.length === 0) return res.code(503).send({ error: "Nenhum peer conectado" })
 
-    const tempVector = [...savedVector, { version: nextVersion, filename }]
-    console.log(`Nova proposta v${nextVersion}:`, tempVector)
-    const proposta = { action: "propose", version: nextVersion, peerId: "leader", saveddata: tempVector }
+    const lastVector = savedVector[savedVector.length - 1]
+    const tempCids = lastVector ? [...lastVector.cids] : []
+    tempCids.push(`pending-${filename}`)
+    const proposta = { action: "propose", version: nextVersion, peerId: "leader", saveddata: [{ version: nextVersion, cids: tempCids }] }
+    console.log(`Nova proposta v${nextVersion}:`, proposta.saveddata)
     await publish(proposta)
     confirmations.set(nextVersion, new Map())
     const result = await waitForMajority(nextVersion, 20000)
@@ -100,27 +102,21 @@ server.post("/files", async (req, res) => {
     const cid = added.cid.toString()
     console.log(`Ficheiro adicionado ao IPFS: ${cid}`)
 
-    let embedding = null
-    if (embedder) {
-      try {
-        let text = fileBuffer.toString("utf-8").replace(/\0/g, "").slice(0, 1000)
-        const output = await embedder(text, { pooling: "mean", normalize: true })
-        embedding = Array.from(output.data)
-      } catch {}
-    }
-
-    savedVector.push({ version: nextVersion, cid })
+    const allCids = lastVector ? [...lastVector.cids, cid] : [cid]
+    savedVector.push({ version: nextVersion, cids: allCids })
     currentVersion = nextVersion
     console.log(`Vetor final confirmado v${currentVersion}:`, savedVector)
-    const commitMsg = { action: "commit", version: currentVersion, cid, peerId: "leader", embedding }
+
+    const commitMsg = { action: "commit", version: currentVersion, vector: savedVector, peerId: "leader" }
     await publish(commitMsg)
     confirmations.delete(nextVersion)
-    return { status: "Commit enviado", version: currentVersion, cid }
+    return { status: "Commit enviado", version: currentVersion, vector: savedVector }
   } catch (err) {
     console.error("Erro em /files:", err)
     return res.code(500).send({ error: err.message })
   }
 })
+
 
 server.get("/peers", async () => ({ peers: Array.from(activePeers) }))
 

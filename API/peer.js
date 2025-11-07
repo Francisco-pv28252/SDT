@@ -43,9 +43,10 @@ async function subscribe() {
       if (data.action === "commit") {
         if (data.version <= currentVersion) return
         console.log(`Commit recebido v${data.version}`)
-        const vetor = tempVectors.get(data.version) || []
+        const vetor = Array.isArray(data.vector) ? data.vector : []
         savedVector.length = 0
         savedVector.push(...vetor)
+        console.log(`Vetor final recebido v${data.version}:`, savedVector)
         currentVersion = data.version
         console.log(`Vetor final atualizado v${currentVersion}:`, savedVector)
         tempVectors.delete(data.version)
