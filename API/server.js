@@ -15,7 +15,7 @@ let embedder = null
 await server.register(import("@fastify/multipart"))
 
 function hashVector(vetor) {
-  return vetor.map(x => x.cid).join("|").split("")
+  return vetor.map(x => x.cid || x.filename || "").join("|").split("")
     .reduce((a, c) => (a + c.charCodeAt(0)) % 100000, 0)
 }
 
@@ -30,73 +30,48 @@ async function subscribeToMessages() {
       const data = JSON.parse(mensagem)
       if (data.action === "hello" && data.peerId) {
         activePeers.add(data.peerId)
-        console.log(`Peer conectado: ${data.peerId} | total = ${activePeers.size}`)
+        console.log(`Peer conectado: ${data.peerId} | total=${activePeers.size}`)
         return
       }
       if (data.action === "ack" && data.version && data.peerId) {
-        if (!confirmations.has(data.version))
-          confirmations.set(data.version, new Map())
+        if (!confirmations.has(data.version)) confirmations.set(data.version, new Map())
         confirmations.get(data.version).set(data.peerId, data.hash)
         console.log(`ACK de ${data.peerId} para versão ${data.version} -> hash=${data.hash}`)
         return
       }
-      if (data.action === "commit") {
-        console.log(`Commit recebido (ignorado): versão=${data.version}, cid=${data.cid}`)
-        return
-      }
-    } catch {
+    } catch (err) {
       console.log("Mensagem inválida:", mensagem)
     }
   })
   console.log(`Subscrito ao tópico ${TOPIC}`)
 }
 
-async function waitForMinPeers(minPeers = 1, maxWaitMs = 15000) {
-  const start = Date.now()
-  while (activePeers.size < minPeers) {
-    if (Date.now() - start > maxWaitMs) {
-      console.log(`Timeout à espera de peers (${maxWaitMs}ms). peers=${activePeers.size}`)
-      return false
-    }
-    console.log(`À espera de ${minPeers} peer(s)... atuais: ${activePeers.size}`)
-    await new Promise(r => setTimeout(r, 500))
-  }
-  console.log(`Temos pelo menos ${minPeers} peer(s).`)
-  return true
-}
-
-function requiredMajority(nPeers) {
-  if (nPeers <= 1) return 1
-  return Math.ceil(nPeers / 2)
+function requiredMajority(n) {
+  if (n <= 1) return 1
+  return Math.ceil(n / 2)
 }
 
 async function waitForMajority(version, timeoutMs = 20000) {
   const start = Date.now()
   const peersSnapshot = Array.from(activePeers)
   const required = requiredMajority(peersSnapshot.length)
-  console.log(`Aguardando maioria para versão ${version}. peers=${peersSnapshot.length}, required=${required}`)
+  console.log(`Aguardando maioria para versão ${version} (peers=${peersSnapshot.length}, req=${required})`)
   return new Promise((resolve) => {
     const check = () => {
-      const confirmed = confirmations.get(version)
+      const conf = confirmations.get(version)
       const now = Date.now()
-      if (confirmed) {
-        const confirmedCount = peersSnapshot.filter(p => confirmed.has(p)).length
+      if (conf) {
+        const confirmedCount = peersSnapshot.filter(p => conf.has(p)).length
         if (confirmedCount >= required) {
-          const hashes = peersSnapshot.filter(p => confirmed.has(p)).map(p => confirmed.get(p))
-          const uniqueHashes = new Set(hashes)
-          if (uniqueHashes.size === 1) {
-            console.log(`Maioria atingida para versão ${version} (${confirmedCount}/${peersSnapshot.length}) hash=${[...uniqueHashes][0]}`)
-            return resolve({ ok: true, hash: [...uniqueHashes][0], confirmedCount })
-          } else {
-            console.log(`Hashes divergentes para versão ${version}:`, Array.from(confirmed.entries()))
+          const hashes = peersSnapshot.filter(p => conf.has(p)).map(p => conf.get(p))
+          const unique = new Set(hashes)
+          if (unique.size === 1) {
+            console.log(`Maioria atingida v${version} (${confirmedCount}/${peersSnapshot.length}) hash=${[...unique][0]}`)
+            return resolve({ ok: true })
           }
         }
       }
-      if (now - start > timeoutMs) {
-        const confirmedCount = confirmations.get(version) ? confirmations.get(version).size : 0
-        console.log(`Timeout (${timeoutMs}ms) para versão ${version}. Confirmados=${confirmedCount}`)
-        return resolve({ ok: false, reason: "timeout", confirmedCount })
-      }
+      if (now - start > timeoutMs) return resolve({ ok: false })
       setTimeout(check, 300)
     }
     check()
@@ -111,41 +86,39 @@ server.post("/files", async (req, res) => {
     const filename = file.filename || "unnamed"
     const nextVersion = currentVersion + 1
     const peers = Array.from(activePeers)
-    if (peers.length === 0)
-      return res.code(503).send({ error: "Nenhum peer conectado" })
-    console.log(`Nova proposta: versão ${nextVersion} (${filename})`)
-    const proposta = { action: "propose", version: nextVersion, peerId: "leader", saveddata: savedVector }
+    if (peers.length === 0) return res.code(503).send({ error: "Nenhum peer conectado" })
+
+    const tempVector = [...savedVector, { version: nextVersion, filename }]
+    console.log(`Nova proposta v${nextVersion}:`, tempVector)
+    const proposta = { action: "propose", version: nextVersion, peerId: "leader", saveddata: tempVector }
     await publish(proposta)
     confirmations.set(nextVersion, new Map())
-    const TIMEOUT_MS = 20000
-    const result = await waitForMajority(nextVersion, TIMEOUT_MS)
-    if (!result.ok) {
-      confirmations.delete(nextVersion)
-      return res.code(409).send({ error: "Não foi possível obter maioria", details: result })
-    }
+    const result = await waitForMajority(nextVersion, 20000)
+    if (!result.ok) return res.code(409).send({ error: "Sem maioria de ACKs" })
+
     const added = await ipfs.add({ path: filename, content: fileBuffer })
     const cid = added.cid.toString()
     console.log(`Ficheiro adicionado ao IPFS: ${cid}`)
+
     let embedding = null
     if (embedder) {
       try {
         let text = fileBuffer.toString("utf-8").replace(/\0/g, "").slice(0, 1000)
         const output = await embedder(text, { pooling: "mean", normalize: true })
         embedding = Array.from(output.data)
-      } catch (e) {
-        console.warn("Erro ao gerar embedding:", e.message || e)
-      }
+      } catch {}
     }
+
     savedVector.push({ version: nextVersion, cid })
     currentVersion = nextVersion
+    console.log(`Vetor final confirmado v${currentVersion}:`, savedVector)
     const commitMsg = { action: "commit", version: currentVersion, cid, peerId: "leader", embedding }
     await publish(commitMsg)
-    console.log(`Commit publicado: versão=${currentVersion}, cid=${cid}`)
     confirmations.delete(nextVersion)
     return { status: "Commit enviado", version: currentVersion, cid }
   } catch (err) {
-    console.error("Erro no endpoint /files:", err)
-    return res.code(500).send({ error: "Erro ao processar ficheiro", details: err.message })
+    console.error("Erro em /files:", err)
+    return res.code(500).send({ error: err.message })
   }
 })
 
@@ -155,18 +128,12 @@ server.listen({ port: 5323 }, async () => {
   console.log("Servidor líder na porta 5323")
   try {
     embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2")
-    console.log("Modelo de embeddings carregado")
-  } catch (e) {
-    console.warn("Falha ao carregar modelo de embeddings:", e.message || e)
+  } catch {
     embedder = null
   }
   await subscribeToMessages()
-  try {
-    const id = await ipfs.id().catch(() => ({ id: "leader-local" }))
-    const helloMsg = { action: "hello", peerId: id.id }
-    await publish(helloMsg)
-    console.log(`Presença do líder anunciada: ${id.id}`)
-  } catch (e) {
-    console.warn("Falha ao publicar hello:", e.message || e)
-  }
+  const id = await ipfs.id().catch(() => ({ id: "leader-local" }))
+  const helloMsg = { action: "hello", peerId: id.id }
+  await publish(helloMsg)
+  console.log(`Presença anunciada: ${id.id}`)
 })
