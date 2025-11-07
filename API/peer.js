@@ -1,47 +1,50 @@
 import { create } from "ipfs-http-client";
-import { pipeline } from "@xenova/transformers";
-
 const ipfs = create({ host: "localhost", port: 5001, protocol: "http" });
+
 const TOPIC = "mensagens-sistema";
+let PEER_ID = "";
+const saveddata = [];
 
-let currentVersion = 0;
-const cids = [];
-const tempEmbeddings = [];
-let embedder;
-const peerId = "peer-7582";
-
-function hashVector(v) {
-  return v.map(x => x.cid).join("|").split("").reduce((a, c) => (a + c.charCodeAt(0)) % 100000, 0);
+function hashVector(vetor) {
+  return vetor.map(x => x.cid).join("|").split("").reduce((a, c) => (a + c.charCodeAt(0)) % 100000, 0);
 }
 
-await ipfs.pubsub.subscribe(TOPIC, async (msg) => {
-  const data = JSON.parse(new TextDecoder().decode(msg.data));
+async function getPeerId() {
+  const idInfo = await ipfs.id();
+  PEER_ID = idInfo.id || `peer-${Math.floor(Math.random() * 10000)}`;
+  console.log(`Peer ativo: ${PEER_ID}`);
+}
 
-  if (data.action === "propose") {
-    if (data.version <= currentVersion) return;
+async function subscribe() {
+  await ipfs.pubsub.subscribe(TOPIC, async (msg) => {
+    const mensagem = new TextDecoder("utf-8").decode(msg.data);
+    try {
+      const data = JSON.parse(mensagem);
 
-    console.log(`Proposta recebida (versão=${data.version}):`);
-    console.log(data.saveddata);
+      if (data.action === "propose") {
+        console.log(`Proposta recebida: versão=${data.version}`);
+        const hash = hashVector(data.saveddata);
+        const ack = { action: "ack", version: data.version, peerId: PEER_ID, hash };
+        await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify(ack), "utf-8"));
+        console.log(`ACK enviado (hash=${hash})`);
+        return;
+      }
 
-    const newVector = data.saveddata || [];
-    const hash = hashVector(newVector);
+      if (data.action === "commit") {
+        console.log(`Commit recebido: versão=${data.version}, cid=${data.cid}`);
+        if (data.saveddata) {
+          saveddata.length = 0;
+          saveddata.push(...data.saveddata);
+          console.log("Novo vetor guardado:");
+          console.table(saveddata);
+        }
+      }
+    } catch {
+      console.log("Mensagem não JSON:", mensagem);
+    }
+  });
+  console.log(`Peer ${PEER_ID} subscrito ao tópico ${TOPIC}`);
+}
 
-    const ack = { action: "ack", version: data.version, peerId, hash };
-    await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify(ack), "utf-8"));
-    console.log(`ACK enviado (versão ${data.version}, hash=${hash})`);
-  }
-
-  if (data.action === "commit") {
-    if (data.version <= currentVersion) return;
-
-    const { version, cid, embedding, saveddata } = data;
-    currentVersion = version;
-    cids.push({ version, cid });
-    tempEmbeddings.push({ version, cid, embedding });
-    console.log(`Commit confirmado: versão ${version}, CID=${cid}`);
-    console.log("Vetor atualizado no peer:", saveddata);
-  }
-});
-
-console.log("Peer ativo e subscrito ao tópico", TOPIC);
-embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
+await getPeerId();
+await subscribe();

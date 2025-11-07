@@ -10,7 +10,7 @@ const prevsaveddata = [];
 const localEmbeddings = [];
 const confirmations = new Map();
 
-const REQUIRED_PEERS = ["peer-7582"];
+
 let embedder;
 let v = 1;
 
@@ -22,6 +22,13 @@ function hashVector(vetor) {
   return vetor.map(x => x.cid).join("|").split("").reduce((a, c) => (a + c.charCodeAt(0)) % 100000, 0);
 }
 
+async function getConnectedPeers() {
+  const peers = await ipfs.swarm.peers();
+  const peerIds = peers.map(p => p.peer.toString());
+  console.log(`Peers conectados: ${peerIds.join(", ") || "(nenhum)"}`);
+  return peerIds;
+}
+
 async function subscribeToMessages() {
   await ipfs.pubsub.subscribe(TOPIC, async (msg) => {
     const mensagem = new TextDecoder("utf-8").decode(msg.data);
@@ -31,7 +38,7 @@ async function subscribeToMessages() {
       if (data.action === "ack") {
         if (!confirmations.has(data.version)) confirmations.set(data.version, new Map());
         confirmations.get(data.version).set(data.peerId, data.hash);
-        console.log(`ACK de ${data.peerId} para versão ${data.version} com hash=${data.hash}`);
+        console.log(`ACK de ${data.peerId} para versão ${data.version} (hash=${data.hash})`);
         return;
       }
 
@@ -56,26 +63,26 @@ server.post("/files", async (req, res) => {
 
     const fileBuffer = await file.toBuffer();
     const filename = file.filename || "unnamed";
+    const candidateVersion = v + 1;
 
+    const REQUIRED_PEERS = await getConnectedPeers();
+    if (REQUIRED_PEERS.length === 0) {
+      return res.code(503).send({ error: "Nenhum peer conectado" });
+    }
 
-    const proposta = {
-      action: "propose",
-      version: v,
-      saveddata,
-    };
-
+    const proposta = { action: "propose", version: candidateVersion, saveddata };
     await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify(proposta), "utf-8"));
-    console.log(`Proposta enviada (versão=${v}, ficheiro=${filename})`);
+    console.log(`Proposta enviada (versão=${candidateVersion}, ficheiro=${filename})`);
     console.log("Estado atual do vetor (antes do commit):", saveddata);
 
-    confirmations.set(v, new Map());
+    confirmations.set(candidateVersion, new Map());
     const TIMEOUT_MS = 20000;
 
     const waitForAllPeers = () =>
       new Promise((resolve) => {
         const start = Date.now();
         const check = () => {
-          const confirmed = confirmations.get(v);
+          const confirmed = confirmations.get(candidateVersion);
           if (
             confirmed &&
             REQUIRED_PEERS.every((p) => confirmed.has(p)) &&
@@ -100,35 +107,28 @@ server.post("/files", async (req, res) => {
 
     let vector = null;
     if (embedder) {
-      let text = fileBuffer.toString("utf-8").replace(/\0/g, "");
-      text = text.slice(0, 1000);
+      let text = fileBuffer.toString("utf-8").replace(/\0/g, "").slice(0, 1000);
       const output = await embedder(text, { pooling: "mean", normalize: true });
       vector = Array.from(output.data);
     }
 
-
     prevsaveddata.push([...saveddata]);
-    saveddata.push({ version: v, cid });
-    localEmbeddings.push({ version: v, cid, embedding: vector });
+    if (saveddata.length === 0 || !saveddata[0].version) saveddata.unshift({ version: candidateVersion });
+    else saveddata[0].version = candidateVersion;
+    saveddata.push({ cid });
+    localEmbeddings.push({ version: candidateVersion, cid, embedding: vector });
 
-    console.log(`Novo vetor (após commit versão ${v}):`);
+    console.log(`Novo vetor (após commit versão ${candidateVersion}):`);
     console.log(saveddata);
 
-    const commitMsg = {
-      action: "commit",
-      version: v,
-      cid,
-      embedding: vector,
-      saveddata,
-    };
-
+    const commitMsg = { action: "commit", version: candidateVersion, cid, embedding: vector, saveddata };
     await ipfs.pubsub.publish(TOPIC, Buffer.from(JSON.stringify(commitMsg), "utf-8"));
-    console.log(`Commit publicado: versão=${v}, CID=${cid}`);
+    console.log(`Commit publicado: versão=${candidateVersion}, CID=${cid}`);
 
-    confirmations.delete(v);
-    v++;
+    confirmations.delete(candidateVersion);
+    v = candidateVersion;
 
-    return { status: "Commit enviado", version: v - 1, cid };
+    return { status: "Commit enviado", version: v, cid };
   } catch (err) {
     console.error("Erro no endpoint /files:", err);
     return res.code(500).send({ error: "Erro ao processar ficheiro" });
